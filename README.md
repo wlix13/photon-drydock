@@ -35,14 +35,14 @@ $ cp wrangler.example.toml wrangler.toml
 npx wrangler r2 bucket create r2-registry
 ```
 
-3. Set the registry credentials:
+1. Set the registry credentials:
 
 ```bash
 npx wrangler secret put USERNAME --env production
 npx wrangler secret put PASSWORD --env production
 ```
 
-4. Deploy your image registry:
+1. Deploy your image registry:
 
 ```bash
 pnpm run deploy
@@ -124,6 +124,16 @@ docker push $REGISTRY_URL/ubuntu:latest
 docker rmi ubuntu:latest $REGISTRY_URL/ubuntu:latest
 docker pull $REGISTRY_URL/ubuntu:latest
 ```
+
+### Admin panel
+
+The registry ships with a browser-based admin panel at `/admin` (e.g. `https://registry.example.com/admin`), and the panel lets you:
+
+- Browse all repositories, expand a repository to list its tags, and expand a tag to inspect its manifest.
+- Delete a single tag, or delete a manifest and every tag that points at it.
+- Run garbage collection (`untagged` or `unreferenced`) on a repository.
+
+Viewing only requires `pull` access, so read-only credentials can browse; the delete and garbage-collection actions require `push` access and are rejected for read-only users.
 
 ### Configuring Pull fallback
 

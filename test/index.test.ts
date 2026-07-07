@@ -142,6 +142,33 @@ async function fetch(r: Request, bindings: Env = env as Env): Promise<Response> 
 
 const username = "hello";
 
+describe("admin panel", () => {
+  test("/admin serves the HTML panel when authenticated", async () => {
+    const res = await fetch(createRequest("GET", "/admin", null));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    const body = await res.text();
+    expect(body).toContain("<!doctype html>");
+    expect(body).toContain("/v2/_catalog");
+  });
+
+  test("/admin/ (trailing slash) also serves the panel", async () => {
+    const res = await fetch(createRequest("GET", "/admin/", null));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+  });
+
+  test("/admin requires authentication", async () => {
+    const res = await fetchUnauth(createRequest("GET", "/admin", null));
+    expect(res.status).toBe(401);
+  });
+
+  test("/admin is not cached at the edge", async () => {
+    const res = await fetch(createRequest("GET", "/admin", null));
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+});
+
 describe("v2", () => {
   test("/v2", async () => {
     const response = await fetch(createRequest("GET", "/v2/", null));
