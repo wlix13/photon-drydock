@@ -1,7 +1,7 @@
 {
   "name": "r2-registry",
 
-  // Custom Cloudflare domain for worker:
+  // Custom Cloudflare domain for worker (required for edge caching)
   // "routes": [
   //   { "pattern": "your.custom.domain", "custom_domain": true }
   // ],
@@ -18,6 +18,9 @@
       "r2_buckets": [{ "binding": "REGISTRY", "bucket_name": "" }],
       "vars": {
         "JWT_REGISTRY_TOKENS_PUBLIC_KEY": "",
+        // Edge caching of manifest and blob reads is on by default (requires custom domain above);
+        // set to "off" to disable.
+        "EDGE_CACHE": "on",
       },
       // Secrets:
       // USERNAME/PASSWORD/READONLY_USERNAME/READONLY_PASSWORD if you want username/password based auth
