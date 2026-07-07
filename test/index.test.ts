@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { SHA256_PREFIX_LEN, getSHA256 } from "../src/user";
+import { SHA256_PREFIX_LEN, getSHA256, UserAuthenticator } from "../src/user";
 import { TagsList } from "../src/router";
 import { Env } from "..";
-import { RegistryTokens } from "../src/token";
-import { RegistryAuthProtocolTokenPayload } from "../src/auth";
+import { RegistryTokens, newRegistryTokens } from "../src/token";
+import { RegistryAuthProtocolTokenPayload, CompositeAuthenticator } from "../src/auth";
+import { authenticationMethodFromEnv } from "../src/authentication-method";
 import { registries } from "../src/registry/registry";
 import type { ReferrerDescriptor } from "../src/registry/registry";
 import { isDockerDotIO, RegistryHTTPClient } from "../src/registry/http";
@@ -1280,6 +1281,111 @@ describe("tokens", async () => {
       capabilities: ["push", "pull"],
     } as RegistryAuthProtocolTokenPayload);
     expect(verified).toBeTruthy();
+  });
+
+  const registryUrl = "https://registry.com";
+
+  test("token signed by a configured public key verifies", async () => {
+    const [privateKey, publicKey] = await RegistryTokens.createPrivateAndPublicKey();
+    const tokens = await newRegistryTokens(publicKey);
+    const token = await tokens.createToken("account", ["pull", "push"], 10, privateKey, registryUrl);
+
+    expect((await tokens.verifyToken(createRequest("GET", "/v2/whatever", null), token)).verified).toBeTruthy();
+    expect((await tokens.verifyToken(createRequest("PUT", "/v2/whatever", null), token)).verified).toBeTruthy();
+  });
+
+  test("token signed by an unknown key is rejected", async () => {
+    const [, publicKey] = await RegistryTokens.createPrivateAndPublicKey();
+    const [unknownPrivateKey] = await RegistryTokens.createPrivateAndPublicKey();
+    const tokens = await newRegistryTokens(publicKey);
+    const token = await tokens.createToken("account", ["pull"], 10, unknownPrivateKey, registryUrl);
+
+    expect((await tokens.verifyToken(createRequest("GET", "/v2/whatever", null), token)).verified).toBeFalsy();
+  });
+
+  test("multiple public keys: a token from any configured key verifies", async () => {
+    const [privateKeyA, publicKeyA] = await RegistryTokens.createPrivateAndPublicKey();
+    const [privateKeyB, publicKeyB] = await RegistryTokens.createPrivateAndPublicKey();
+    const tokens = await newRegistryTokens(`${publicKeyA},${publicKeyB}`);
+    const tokenA = await tokens.createToken("account", ["pull"], 10, privateKeyA, registryUrl);
+    const tokenB = await tokens.createToken("account", ["pull"], 10, privateKeyB, registryUrl);
+
+    expect((await tokens.verifyToken(createRequest("GET", "/v2/whatever", null), tokenA)).verified).toBeTruthy();
+    expect((await tokens.verifyToken(createRequest("GET", "/v2/whatever", null), tokenB)).verified).toBeTruthy();
+  });
+
+  test("read-only key caps a push-capable token to pull", async () => {
+    const [privateKey, publicKey] = await RegistryTokens.createPrivateAndPublicKey();
+    // Registered as a read-only key even though the token below claims push.
+    const tokens = await newRegistryTokens(undefined, publicKey);
+    const token = await tokens.createToken("account", ["pull", "push"], 10, privateKey, registryUrl);
+
+    // pull (GET) is allowed
+    expect((await tokens.verifyToken(createRequest("GET", "/v2/whatever", null), token)).verified).toBeTruthy();
+    // push (PUT/DELETE) is denied despite the token claiming "push"
+    expect((await tokens.verifyToken(createRequest("PUT", "/v2/whatever", null), token)).verified).toBeFalsy();
+    expect((await tokens.verifyToken(createRequest("DELETE", "/v2/whatever", null), token)).verified).toBeFalsy();
+  });
+
+  test("a full key and a read-only key can be configured together", async () => {
+    const [fullPrivateKey, fullPublicKey] = await RegistryTokens.createPrivateAndPublicKey();
+    const [roPrivateKey, roPublicKey] = await RegistryTokens.createPrivateAndPublicKey();
+    const tokens = await newRegistryTokens(fullPublicKey, roPublicKey);
+    const fullToken = await tokens.createToken("account", ["pull", "push"], 10, fullPrivateKey, registryUrl);
+    const roToken = await tokens.createToken("account", ["pull", "push"], 10, roPrivateKey, registryUrl);
+
+    // The full key's token can push...
+    expect((await tokens.verifyToken(createRequest("PUT", "/v2/whatever", null), fullToken)).verified).toBeTruthy();
+    // ...while the read-only key's token cannot, but can still pull.
+    expect((await tokens.verifyToken(createRequest("PUT", "/v2/whatever", null), roToken)).verified).toBeFalsy();
+    expect((await tokens.verifyToken(createRequest("GET", "/v2/whatever", null), roToken)).verified).toBeTruthy();
+  });
+});
+
+describe("combined auth (jwt + username/password)", async () => {
+  const registryUrl = "https://registry.com";
+
+  const basicAuth = (username: string, password: string) => ({
+    Authorization: `Basic ${encode(`${username}:${password}`)}`,
+  });
+
+  test("a composite of user + jwt auth accepts either credential", async () => {
+    const [privateKey, publicKey] = await RegistryTokens.createPrivateAndPublicKey();
+    const jwtAuth = await newRegistryTokens(publicKey);
+    const userAuth = new UserAuthenticator([{ username: "alice", password: "s3cret", capabilities: ["pull", "push"] }]);
+    const composite = new CompositeAuthenticator([userAuth, jwtAuth]);
+    const token = await jwtAuth.createToken("account", ["pull"], 10, privateKey, registryUrl);
+
+    // username/password verifies
+    const userReq = createRequest("GET", "/v2/whatever", null, basicAuth("alice", "s3cret"));
+    expect((await composite.checkCredentials(userReq)).verified).toBeTruthy();
+
+    // a JWT presented as the Basic-auth password verifies through the same authenticator
+    const jwtReq = createRequest("GET", "/v2/whatever", null, basicAuth("v0", token));
+    expect((await composite.checkCredentials(jwtReq)).verified).toBeTruthy();
+
+    // a wrong password matches neither method
+    const badReq = createRequest("GET", "/v2/whatever", null, basicAuth("alice", "nope"));
+    expect((await composite.checkCredentials(badReq)).verified).toBeFalsy();
+  });
+
+  test("authenticationMethodFromEnv enables both when configured together", async () => {
+    const [privateKey, publicKey] = await RegistryTokens.createPrivateAndPublicKey();
+    const method = await authenticationMethodFromEnv({
+      USERNAME: "alice",
+      PASSWORD: "s3cret",
+      JWT_REGISTRY_TOKENS_PUBLIC_KEY: publicKey,
+    } as Env);
+    if (!method) throw new Error("expected an authenticator to be configured");
+
+    const signer = await newRegistryTokens(publicKey);
+    const token = await signer.createToken("account", ["pull"], 10, privateKey, registryUrl);
+
+    const userReq = createRequest("GET", "/v2/whatever", null, basicAuth("alice", "s3cret"));
+    expect((await method.checkCredentials(userReq)).verified).toBeTruthy();
+
+    const jwtReq = createRequest("GET", "/v2/whatever", null, basicAuth("v0", token));
+    expect((await method.checkCredentials(jwtReq)).verified).toBeTruthy();
   });
 });
 

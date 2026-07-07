@@ -12,6 +12,7 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "jwt": "node scripts/jwt.mjs",
     "test": "vitest run"
   },
   "dependencies": {

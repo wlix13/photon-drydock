@@ -63,3 +63,27 @@ export function stripUsernamePasswordFromHeader(r: Request): [string, string] | 
     return { verified: false, payload: null };
   }
 }
+
+// Tries each configured authenticator in order and accepts the request on the
+// first one that verifies it. This is what lets username/password and JWT auth run together.
+export class CompositeAuthenticator implements Authenticator {
+  authmode: string;
+
+  constructor(private authenticators: Authenticator[]) {
+    this.authmode = authenticators.map((authenticator) => authenticator.authmode).join("+");
+  }
+
+  async checkCredentials(r: Request): Promise<AuthenticatorCheckCredentialsResponse> {
+    let lastResponse: AuthenticatorCheckCredentialsResponse = { verified: false, payload: null };
+    for (const authenticator of this.authenticators) {
+      const response = await authenticator.checkCredentials(r);
+      if (response.verified) {
+        return response;
+      }
+
+      lastResponse = response;
+    }
+
+    return lastResponse;
+  }
+}

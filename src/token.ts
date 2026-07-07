@@ -14,17 +14,43 @@ export function importKeyFromBase64(key: string): JsonWebKeyWithKid {
   return JSON.parse(decode(key)) as JsonWebKeyWithKid;
 }
 
-export async function newRegistryTokens(jwtPublicKey: string): Promise<RegistryTokens> {
-  return new RegistryTokens(importKeyFromBase64(jwtPublicKey));
+// A single env var may hold several public keys as a comma-separated list of
+// base64-encoded JWKs. Undefined/empty entries are ignored.
+export function importKeysFromBase64(keys: string | undefined): JsonWebKeyWithKid[] {
+  if (keys === undefined) {
+    return [];
+  }
+
+  return keys
+    .split(",")
+    .map((key) => key.trim())
+    .filter((key) => key.length > 0)
+    .map(importKeyFromBase64);
+}
+
+// A verification key paired with the capabilities it is allowed to grant.
+// A read-only key caps every token it signs to "pull" regardless of what the
+// token claims, so even a leaked read-only signing key can never push.
+export type RegistryPublicKey = {
+  key: JsonWebKeyWithKid;
+  readOnly: boolean;
+};
+
+export async function newRegistryTokens(jwtPublicKey?: string, readonlyJwtPublicKey?: string): Promise<RegistryTokens> {
+  const keys: RegistryPublicKey[] = [
+    ...importKeysFromBase64(jwtPublicKey).map((key) => ({ key, readOnly: false })),
+    ...importKeysFromBase64(readonlyJwtPublicKey).map((key) => ({ key, readOnly: true })),
+  ];
+  return new RegistryTokens(keys);
 }
 
 export class RegistryTokens implements Authenticator {
-  private jwtPublicKey: JsonWebKeyWithKid;
+  private keys: RegistryPublicKey[];
   authmode: string;
 
-  constructor(jwtPublicKey: JsonWebKeyWithKid) {
+  constructor(keys: RegistryPublicKey[]) {
     this.authmode = "RegistryTokens";
-    this.jwtPublicKey = jwtPublicKey;
+    this.keys = keys;
   }
 
   /**
@@ -88,16 +114,24 @@ export class RegistryTokens implements Authenticator {
     payload: RegistryAuthProtocolTokenPayload | null;
   }> {
     try {
-      // first verify the JWT
-      if (!(await jwt.verify(token, this.jwtPublicKey, { algorithm: "ES256" }))) {
-        console.warn("verifyToken: jwt.verify() failed");
-        return { verified: false, payload: null };
+      // Try every configured public key. The token is accepted the first time a key verifies its signature.
+      for (const { key, readOnly } of this.keys) {
+        if (!(await jwt.verify(token, key, { algorithm: "ES256" }))) {
+          // Signature didn't match this key; another configured key might match.
+          continue;
+        }
+
+        // the JWT signature is valid, decode it now
+        const decoded = jwt.decode(token);
+        const payload = decoded.payload as RegistryAuthProtocolTokenPayload;
+        const effectivePayload: RegistryAuthProtocolTokenPayload = readOnly
+          ? { ...payload, capabilities: payload.capabilities.filter((capability) => capability === "pull") }
+          : payload;
+        return RegistryTokens.verifyPayload(request, effectivePayload);
       }
 
-      // the JWT signature is valid, decode it now
-      const decoded = jwt.decode(token);
-      const payload = decoded.payload as RegistryAuthProtocolTokenPayload;
-      return RegistryTokens.verifyPayload(request, payload);
+      console.warn("verifyToken: no configured public key verified the token");
+      return { verified: false, payload: null };
     } catch (error) {
       // If the verification fails (e.g., due to token expiration or signature mismatch),
       // jwt.verify() will throw an error which we can catch here.

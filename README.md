@@ -59,6 +59,52 @@ Set the USERNAME and PASSWORD as secrets with `npx wrangler secret put USERNAME 
 You can add a base64 encoded JWT public key to verify passwords (or token) that are signed by the private key.
 `npx wrangler secret put JWT_REGISTRY_TOKENS_PUBLIC_KEY --env production`
 
+The token carries its own capabilities (`pull` and/or `push`), which are checked per request.
+
+**Multiple keys:** both `JWT_REGISTRY_TOKENS_PUBLIC_KEY` and `READONLY_JWT_REGISTRY_TOKENS_PUBLIC_KEY` accept a comma-separated list of base64-encoded public keys, so you can trust several signing keys at once and rotate them independently. A token is accepted if any configured key verifies its signature.
+
+**Read-only keys:** keys set in `READONLY_JWT_REGISTRY_TOKENS_PUBLIC_KEY` cap every token they
+sign to `pull`, regardless of the capabilities the token claims. Hand a read-only signing key to a
+party that should only ever pull, and it can never be used to push — even if the token requests it.
+`npx wrangler secret put READONLY_JWT_REGISTRY_TOKENS_PUBLIC_KEY --env production`
+
+**Combined with username/password:** JWT and username/password authentication can be enabled at the
+same time. When both are configured, a request is accepted if _either_ method verifies it — so, for example, humans can log in with a username/password while CI systems present signed tokens.
+
+#### Generating keys and tokens
+
+A small CLI (`scripts/jwt.mjs`, no build step required) generates the keypair and signs tokens.
+
+First, generate a keypair once and set the **public** key as a secret:
+
+```bash
+pnpm jwt genkey
+# Set the printed public key as a secret. Use JWT_REGISTRY_TOKENS_PUBLIC_KEY for full access,
+# or READONLY_JWT_REGISTRY_TOKENS_PUBLIC_KEY to force every token from this key to pull-only:
+npx wrangler secret put JWT_REGISTRY_TOKENS_PUBLIC_KEY --env production
+```
+
+Then sign tokens with the **private** key — read-only or full access:
+
+```bash
+# full access (pull + push) — the default
+pnpm jwt sign --private <base64-private-key> --full
+
+# read-only (pull only), expiring in 30 minutes
+pnpm jwt sign --private <base64-private-key> --readonly --exp 30
+```
+
+The printed token is used as the **password** when logging in (any username works):
+
+```bash
+echo "<token>" | docker login --username v0 --password-stdin $REGISTRY_URL
+```
+
+There are two independent ways to get a read-only credential: sign a token with `--readonly`
+(the token itself only claims `pull`), or register the signing key under
+`READONLY_JWT_REGISTRY_TOKENS_PUBLIC_KEY` (which caps _any_ token from that key to `pull`, even one
+signed with `--full`). Run `pnpm jwt` with no arguments for the full list of options.
+
 ### Using with Docker
 
 You can use this registry with Docker to push and pull images.

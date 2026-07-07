@@ -10,6 +10,24 @@ export default defineConfig(
   js.configs.recommended,
   tseslint.configs.recommended,
   {
+    // Standalone Node scripts (plain JS, so no-undef is active) — declare the
+    // Node/Web globals they rely on.
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: {
+        console: "readonly",
+        process: "readonly",
+        crypto: "readonly",
+        btoa: "readonly",
+        atob: "readonly",
+        Buffer: "readonly",
+        URL: "readonly",
+        TextEncoder: "readonly",
+        TextDecoder: "readonly",
+      },
+    },
+  },
+  {
     rules: {
       // Treat underscore-prefixed identifiers as intentionally unused.
       "@typescript-eslint/no-unused-vars": [

@@ -17,7 +17,11 @@
     "production": {
       "r2_buckets": [{ "binding": "REGISTRY", "bucket_name": "" }],
       "vars": {
+        // Comma-separated list of base64-encoded JWT public keys. Tokens signed by any
+        // of these keys are granted whatever capabilities the token claims.
         "JWT_REGISTRY_TOKENS_PUBLIC_KEY": "",
+        // Same format, but tokens signed by these keys are capped to pull (read-only).
+        // "READONLY_JWT_REGISTRY_TOKENS_PUBLIC_KEY": "",
         // Edge caching of manifest and blob reads is on by default (requires custom domain above);
         // set to "off" to disable.
         "EDGE_CACHE": "on",
