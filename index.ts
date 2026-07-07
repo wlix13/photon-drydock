@@ -17,7 +17,12 @@ type PushCompatibilityMode = "full" | "none";
 export interface Env {
   REGISTRY: R2Bucket;
   ENVIRONMENT: string;
+  // Comma-separated list of base64-encoded JWT public keys (JWKs). Tokens signed
+  // by any of these keys are granted whatever capabilities the token claims.
   JWT_REGISTRY_TOKENS_PUBLIC_KEY?: string;
+  // Same format, but tokens signed by these keys are capped to "pull" (read-only)
+  // regardless of the capabilities in the token.
+  READONLY_JWT_REGISTRY_TOKENS_PUBLIC_KEY?: string;
   USERNAME?: string;
   PASSWORD?: string;
   READONLY_USERNAME?: string;
