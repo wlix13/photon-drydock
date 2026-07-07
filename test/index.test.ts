@@ -10,6 +10,7 @@ import { isDockerDotIO, RegistryHTTPClient } from "../src/registry/http";
 import { encode } from "@cfworker/base64url";
 import { ManifestSchema } from "../src/manifest";
 import { limit } from "../src/chunk";
+import { EDGE_CACHE_STATUS_HEADER } from "../src/edge-cache";
 import worker from "../index";
 import { env } from "cloudflare:workers";
 import { createExecutionContext, reset, waitOnExecutionContext } from "cloudflare:test";
@@ -126,16 +127,16 @@ function usernamePasswordToAuth(username: string, password: string): string {
   return `Basic ${btoa(`${username}:${password}`)}`;
 }
 
-async function fetchUnauth(r: Request): Promise<Response> {
+async function fetchUnauth(r: Request, bindings: Env = env as Env): Promise<Response> {
   const ctx = createExecutionContext();
-  const res = await worker.fetch(r, env as Env, ctx);
+  const res = await worker.fetch(r, bindings, ctx);
   await waitOnExecutionContext(ctx);
   return res as Response;
 }
 
-async function fetch(r: Request): Promise<Response> {
+async function fetch(r: Request, bindings: Env = env as Env): Promise<Response> {
   r.headers.append("Authorization", usernamePasswordToAuth(username, "world"));
-  return await fetchUnauth(r);
+  return await fetchUnauth(r, bindings);
 }
 
 const username = "hello";
@@ -1448,6 +1449,68 @@ describe("http client", () => {
     expect("exists" in res && res.exists).toBe(false);
   });
 
+  test("bearer authentication with a ghcr-style token service", async () => {
+    envBindings = { ...bindings };
+    const digest = await getSHA256("{}");
+    const tokenScopes: string[] = [];
+    using _fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const request = new Request(input as string | URL | Request, init);
+      const url = new URL(request.url);
+      if (url.pathname === "/v2/") {
+        return new Response(null, {
+          status: 401,
+          headers: {
+            // Exactly like ghcr.io: no spaces between attributes and a literal placeholder scope
+            "WWW-Authenticate":
+              'Bearer realm="https://ghcr.example.com/token",service="ghcr.example.com",scope="repository:user/image:pull"',
+          },
+        });
+      }
+
+      if (url.pathname === "/token") {
+        // ghcr.io only accepts the "simple" GET token flow
+        if (request.method === "POST") {
+          return new Response(null, { status: 405 });
+        }
+
+        const scope = url.searchParams.get("scope") ?? "";
+        tokenScopes.push(scope);
+        // ghcr.io denies anonymous tokens that request push access
+        if (scope !== "repository:owner/image:pull") {
+          return new Response(JSON.stringify({ errors: [{ code: "DENIED" }] }), { status: 403 });
+        }
+
+        return new Response(JSON.stringify({ token: "ghcr-token", expires_in: 300 }), { status: 200 });
+      }
+
+      if (url.pathname === "/v2/owner/image/manifests/latest") {
+        if (request.headers.get("Authorization") !== "Bearer ghcr-token") {
+          return new Response(null, { status: 401 });
+        }
+
+        return new Response(null, {
+          status: 200,
+          headers: {
+            "Content-Length": "2",
+            "Content-Type": "application/vnd.oci.image.manifest.v1+json",
+            "Docker-Content-Digest": digest,
+          },
+        });
+      }
+
+      return new Response(null, { status: 404 });
+    });
+
+    const client = new RegistryHTTPClient(envBindings, { registry: "https://ghcr.example.com" });
+    const res = await client.manifestExists("owner/image", "latest");
+    expect("exists" in res && res.exists, `expected manifest to exist, got ${JSON.stringify(res)}`).toBe(true);
+    if ("exists" in res && res.exists) {
+      expect(res.digest).toEqual(digest);
+    }
+
+    expect(tokenScopes).toEqual(["repository:owner/image:pull"]);
+  });
+
   test("test list referrers", async () => {
     const name = "http-client-referrers";
     const subjectDigest = numberedDigest(9997);
@@ -2379,4 +2442,193 @@ test("docker.io", () => {
       throw new Error(`Expected ${testCase[1]} on ${testCase[0]} but got ${isDocker}`);
     }
   }
+});
+
+describe("edge cache", () => {
+  // The shared test environment sets EDGE_CACHE=off so that cached reads can't
+  // mask R2 state changes in unrelated tests. These tests opt in explicitly.
+  function edgeCacheEnv(): Env {
+    return { ...(env as Env), EDGE_CACHE: "on" };
+  }
+
+  async function fetchWithEdgeCache(r: Request): Promise<Response> {
+    return await fetch(r, edgeCacheEnv());
+  }
+
+  // GETs the URL through the caching worker and drains the response, so a
+  // subsequent request can be served from the cache
+  async function primeCache(url: string): Promise<Response> {
+    const res = await fetchWithEdgeCache(createRequest("GET", url, null));
+    await res.body?.cancel();
+    return res;
+  }
+
+  test("GET manifest by tag is cached on the edge", async () => {
+    const name = "edge-cache-manifest";
+    const manifest = await generateManifest(name);
+    await createManifest(name, manifest, "latest");
+    const url = `/v2/${name}/manifests/latest`;
+
+    const first = await fetchWithEdgeCache(createRequest("GET", url, null));
+    expect(first.status).toBe(200);
+    expect(first.headers.get(EDGE_CACHE_STATUS_HEADER)).toEqual("MISS");
+    expect(await first.json()).toEqual(manifest);
+
+    const second = await fetchWithEdgeCache(createRequest("GET", url, null));
+    expect(second.status).toBe(200);
+    expect(second.headers.get(EDGE_CACHE_STATUS_HEADER)).toEqual("HIT");
+    // The stored Cache-Control only sets the edge TTL and must not reach clients
+    expect(second.headers.get("Cache-Control")).toBeNull();
+    expect(second.headers.get("Docker-Content-Digest")).toEqual(first.headers.get("Docker-Content-Digest"));
+    expect(await second.json()).toEqual(manifest);
+  });
+
+  test("HEAD manifest is served from a cached GET", async () => {
+    const name = "edge-cache-head";
+    const manifest = await generateManifest(name);
+    const { sha256 } = await createManifest(name, manifest, "latest");
+    const url = `/v2/${name}/manifests/latest`;
+
+    const headMiss = await fetchWithEdgeCache(createRequest("HEAD", url, null));
+    expect(headMiss.status).toBe(200);
+    expect(headMiss.headers.get(EDGE_CACHE_STATUS_HEADER)).toEqual("MISS");
+
+    const get = await fetchWithEdgeCache(createRequest("GET", url, null));
+    expect(get.headers.get(EDGE_CACHE_STATUS_HEADER)).toEqual("MISS");
+    await get.body?.cancel();
+
+    const headHit = await fetchWithEdgeCache(createRequest("HEAD", url, null));
+    expect(headHit.status).toBe(200);
+    expect(headHit.headers.get(EDGE_CACHE_STATUS_HEADER)).toEqual("HIT");
+    expect(headHit.headers.get("Docker-Content-Digest")).toEqual(sha256);
+    expect(headHit.body).toBeNull();
+  });
+
+  test("GET blob is cached on the edge", async () => {
+    const name = "edge-cache-blob";
+    const manifest = await generateManifest(name);
+    await createManifest(name, manifest, "latest");
+    const digest = getLayersFromManifest(manifest)[0];
+    const url = `/v2/${name}/blobs/${digest}`;
+
+    const first = await fetchWithEdgeCache(createRequest("GET", url, null));
+    expect(first.status).toBe(200);
+    expect(first.headers.get(EDGE_CACHE_STATUS_HEADER)).toEqual("MISS");
+    const firstBody = await first.text();
+
+    const second = await fetchWithEdgeCache(createRequest("GET", url, null));
+    expect(second.status).toBe(200);
+    expect(second.headers.get(EDGE_CACHE_STATUS_HEADER)).toEqual("HIT");
+    expect(second.headers.get("Docker-Content-Digest")).toEqual(digest);
+    expect(await second.text()).toEqual(firstBody);
+  });
+
+  test("PUT manifest invalidates the cached tag", async () => {
+    const name = "edge-cache-retag";
+    const manifest = await generateManifest(name);
+    await createManifest(name, manifest, "latest");
+    const url = `/v2/${name}/manifests/latest`;
+
+    await primeCache(url);
+    const cached = await primeCache(url);
+    expect(cached.headers.get(EDGE_CACHE_STATUS_HEADER)).toEqual("HIT");
+    const oldDigest = cached.headers.get("Docker-Content-Digest");
+
+    // Push a different manifest under the same tag through the caching worker
+    const newManifest = await generateManifest(name);
+    const data = JSON.stringify(newManifest);
+    const put = await fetchWithEdgeCache(
+      createRequest("PUT", url, new Blob([data]).stream(), { "Content-Type": "application/gzip" }),
+    );
+    expect(put.status).toBe(201);
+
+    const fresh = await fetchWithEdgeCache(createRequest("GET", url, null));
+    expect(fresh.headers.get(EDGE_CACHE_STATUS_HEADER)).toEqual("MISS");
+    expect(fresh.headers.get("Docker-Content-Digest")).toEqual(await getSHA256(data));
+    expect(fresh.headers.get("Docker-Content-Digest")).not.toEqual(oldDigest);
+    expect(await fresh.json()).toEqual(newManifest);
+  });
+
+  test("DELETE manifest invalidates the cached tag", async () => {
+    const name = "edge-cache-delete-manifest";
+    const manifest = await generateManifest(name);
+    await createManifest(name, manifest, "latest");
+    const url = `/v2/${name}/manifests/latest`;
+
+    await primeCache(url);
+    const del = await fetchWithEdgeCache(createRequest("DELETE", url, null));
+    expect(del.status).toBe(202);
+
+    const afterDelete = await fetchWithEdgeCache(createRequest("GET", url, null));
+    expect(afterDelete.status).toBe(404);
+    expect(afterDelete.headers.get(EDGE_CACHE_STATUS_HEADER)).toEqual("MISS");
+  });
+
+  test("DELETE manifest by digest invalidates cached tag aliases", async () => {
+    const name = "edge-cache-delete-by-digest";
+    const manifest = await generateManifest(name);
+    const { sha256 } = await createManifest(name, manifest, "latest");
+    const tagUrl = `/v2/${name}/manifests/latest`;
+
+    await primeCache(tagUrl);
+    const cached = await primeCache(tagUrl);
+    expect(cached.headers.get(EDGE_CACHE_STATUS_HEADER)).toEqual("HIT");
+
+    // Deleting by digest also deletes the "latest" tag alias in R2; the tag's
+    // cache entry must be purged with it
+    const del = await fetchWithEdgeCache(createRequest("DELETE", `/v2/${name}/manifests/${sha256}`, null));
+    expect(del.status).toBe(202);
+
+    const afterDelete = await fetchWithEdgeCache(createRequest("GET", tagUrl, null));
+    expect(afterDelete.status).toBe(404);
+    expect(afterDelete.headers.get(EDGE_CACHE_STATUS_HEADER)).toEqual("MISS");
+  });
+
+  test("DELETE blob invalidates the cached blob", async () => {
+    const name = "edge-cache-delete-blob";
+    const manifest = await generateManifest(name);
+    await createManifest(name, manifest, "latest");
+    const digest = getLayersFromManifest(manifest)[0];
+    const url = `/v2/${name}/blobs/${digest}`;
+
+    await primeCache(url);
+    const cached = await primeCache(url);
+    expect(cached.headers.get(EDGE_CACHE_STATUS_HEADER)).toEqual("HIT");
+
+    const del = await fetchWithEdgeCache(createRequest("DELETE", url, null));
+    expect(del.status).toBe(202);
+
+    const afterDelete = await fetchWithEdgeCache(createRequest("GET", url, null));
+    expect(afterDelete.status).toBe(404);
+    expect(afterDelete.headers.get(EDGE_CACHE_STATUS_HEADER)).toEqual("MISS");
+  });
+
+  test("cached responses still require authentication", async () => {
+    const name = "edge-cache-auth";
+    const manifest = await generateManifest(name);
+    await createManifest(name, manifest, "latest");
+    const url = `/v2/${name}/manifests/latest`;
+
+    // Prime the cache with an authenticated request
+    await primeCache(url);
+
+    const unauth = await fetchUnauth(createRequest("GET", url, null), edgeCacheEnv());
+    expect(unauth.status).toBe(401);
+  });
+
+  test("EDGE_CACHE=off disables the edge cache", async () => {
+    const name = "edge-cache-disabled";
+    const manifest = await generateManifest(name);
+    await createManifest(name, manifest, "latest");
+    const url = `/v2/${name}/manifests/latest`;
+
+    // The default test environment has EDGE_CACHE=off
+    const first = await fetch(createRequest("GET", url, null));
+    expect(first.status).toBe(200);
+    expect(first.headers.get(EDGE_CACHE_STATUS_HEADER)).toBeNull();
+
+    const second = await fetch(createRequest("GET", url, null));
+    expect(second.status).toBe(200);
+    expect(second.headers.get(EDGE_CACHE_STATUS_HEADER)).toBeNull();
+  });
 });

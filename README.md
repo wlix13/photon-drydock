@@ -10,7 +10,7 @@ Username/Password and public key JWT based authentication.
 You have to install all the dependencies with [pnpm](https://pnpm.io/installation) (other package managers may work, but only pnpm is supported.)
 
 ```bash
-$ pnpm install
+pnpm install
 ```
 
 After installation, there are a few steps to actually deploy the registry into production:
@@ -27,35 +27,28 @@ $ cp wrangler.example.jsonc wrangler.jsonc
 $ cp wrangler.example.toml wrangler.toml
 ```
 
-2. Setup the R2 Bucket for this registry
+1. In your config, replace `registry.example.com` in `routes` with your own (sub)domain. The domain's zone must be on your Cloudflare account; Cloudflare creates the DNS record for you on deploy. A custom domain is required for [edge caching](#edge-caching) — if you'd rather use the default `*.workers.dev` domain, remove the `routes` line and set `workers_dev` to `true` (the registry works, but nothing is cached).
+
+2. Create the R2 bucket (the config already references it by name):
 
 ```bash
-$ npx wrangler --env production r2 bucket create r2-registry
+npx wrangler r2 bucket create r2-registry
 ```
 
-Add this to your wrangler config file:
-
-```jsonc
-// wrangler.jsonc
-"r2_buckets": [
-  { "binding": "REGISTRY", "bucket_name": "r2-registry" }
-]
-```
-
-```toml
-# wrangler.toml
-r2_buckets = [
-  { binding = "REGISTRY", bucket_name = "r2-registry" }
-]
-```
-
-3. Deploy your image registry
+3. Set the registry credentials:
 
 ```bash
-$ npx wrangler deploy --env production
+npx wrangler secret put USERNAME --env production
+npx wrangler secret put PASSWORD --env production
 ```
 
-Your registry should be up and running. It will refuse any requests if you don't setup credentials.
+4. Deploy your image registry:
+
+```bash
+pnpm run deploy
+```
+
+Your registry is now live on your domain. It will refuse any requests until the credentials from step 4 are set.
 
 ### Adding username password based authentication
 
@@ -136,6 +129,28 @@ the target registry and setup the credentials.
 
 **Never put a registry password/token inside your wrangler config file, please always use `wrangler secrets put`**
 
+#### GitHub Container Registry (ghcr.io)
+
+The example wrangler configs ship with anonymous `ghcr.io` fallback enabled by default, which works for public
+images:
+
+```jsonc
+"REGISTRIES_JSON": "[{ \"registry\": \"https://ghcr.io\" }]"
+```
+
+For private images, use a [GitHub personal access token](https://github.com/settings/tokens) with the
+`read:packages` scope:
+
+```jsonc
+"REGISTRIES_JSON": "[{ \"registry\": \"https://ghcr.io\", \"username\": \"<your-github-username>\", \"password_env\": \"GHCR_TOKEN\" }]"
+```
+
+```bash
+echo $GITHUB_PAT | npx wrangler secret put GHCR_TOKEN --env production
+```
+
+#### Docker Hub
+
 You can also use docker.io with anonymous authentication:
 
 ```jsonc
@@ -149,6 +164,33 @@ REGISTRIES_JSON = "[{ \"registry\": \"https://index.docker.io/\" }]"
 ```
 
 You can also set your `docker.io` credentials in the configuration to not have any rate-limiting.
+
+### Edge caching
+
+The registry caches manifest and blob downloads on Cloudflare's edge with the [Cache API](https://developers.cloudflare.com/workers/runtime-apis/cache/), reducing both R2 read operations and
+pull latency. It is enabled by default and has the following semantics:
+
+- Authentication is always enforced before the cache is consulted; responses are only cached after a successful authenticated request, and the cache is per data center.
+- Content addressed by digest (blobs, and manifests requested by digest) is immutable and cached for up to 7 days.
+- Manifests requested by tag are cached for up to 60 seconds. Pushing or deleting a tag invalidates the cache immediately in the data center that handled the request (deleting a manifest by digest also purges the cache entries of its tag aliases); other data centers can serve the previous tag for at most 60 seconds.
+- With [pull fallback](#configuring-pull-fallback) configured, a cached response also postpones retries of the background copy into R2 in that data center until the TTL expires; other data centers still trigger the copy on their first pull.
+- Content removed by the garbage collector can still be served from data centers that cached it until the TTL expires (up to 7 days). If you need deleted content gone everywhere immediately, use a [cache purge](https://developers.cloudflare.com/cache/how-to/purge-cache/) on your zone.
+- Responses to cacheable endpoints include an `X-Registry-Cache: HIT|MISS` header for observability.
+
+The Cache API is a no-op on `*.workers.dev` domains, so edge caching only takes effect when the Worker runs on a [custom domain or route](https://developers.cloudflare.com/workers/configuration/routing/).
+
+To disable it, set the variable in your wrangler config file:
+
+```jsonc
+// wrangler.jsonc
+"vars": { "EDGE_CACHE": "off" }
+```
+
+```toml
+# wrangler.toml
+[env.production.vars]
+EDGE_CACHE = "off"
+```
 
 ### Known limitations
 

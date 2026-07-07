@@ -8,6 +8,7 @@ import v2Router from "./src/router";
 import { authenticationMethodFromEnv } from "./src/authentication-method";
 import { Registry } from "./src/registry/registry";
 import { R2Registry } from "./src/registry/r2";
+import { withEdgeCache } from "./src/edge-cache";
 
 // A full compatibility mode means that the r2 registry will try its best to
 // help the client on the layer push. See how we let the client push layers with chunked uploads for more information.
@@ -22,6 +23,7 @@ export interface Env {
   READONLY_USERNAME?: string;
   READONLY_PASSWORD?: string;
   PUSH_COMPATIBILITY_MODE?: PushCompatibilityMode;
+  EDGE_CACHE?: "on" | "off";
   REGISTRIES_JSON?: string; // should be in the format of RegistryConfiguration[];
   REGISTRY_CLIENT: Registry;
 }
@@ -36,7 +38,7 @@ router.all("/v2/*", v2Router.fetch);
 router.all("*", () => new Response("Not Found.", { status: 404 }));
 
 export default {
-  async fetch(request: Request, env: Env, context?: ExecutionContext) {
+  async fetch(request: Request, env: Env, context: ExecutionContext) {
     if (!ensureConfig(env)) {
       return new AuthErrorResponse(request);
     }
@@ -54,8 +56,9 @@ export default {
 
     env.REGISTRY_CLIENT = new R2Registry(env);
     try {
-      // Dispatch the request to the appropriate route
-      const res = await router.fetch(request, env, context);
+      // Dispatch the request to the appropriate route, serving cacheable
+      // reads from the edge cache when possible
+      const res = await withEdgeCache(request, env, context, () => router.fetch(request, env, context));
       return res;
     } catch (err) {
       if (err instanceof Response) {

@@ -17,6 +17,9 @@
       "vars": {
         "USERNAME": "hello",
         "PASSWORD": "world",
+        // Tests opt into edge caching explicitly by overriding this per-request,
+        // so that cached reads can't mask R2 state changes in unrelated tests.
+        "EDGE_CACHE": "off",
       },
     },
   },

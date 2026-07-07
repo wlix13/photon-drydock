@@ -256,7 +256,15 @@ export class RegistryHTTPClient implements Registry {
       return "";
     }
 
-    return (this.env as unknown as Record<string, string>)[configuration.password_env] ?? "";
+    const password = (this.env as unknown as Record<string, string>)[configuration.password_env];
+    if (password === undefined) {
+      console.error(
+        `registry ${this.url.host}: env variable/secret ${configuration.password_env} is not set, trying an empty password`,
+      );
+      return "";
+    }
+
+    return password;
   }
 
   async authenticate(namespace: string): Promise<HTTPContext> {
@@ -293,7 +301,10 @@ export class RegistryHTTPClient implements Registry {
     }
 
     const authCtx = authHeaderIntoAuthContext(this.url, authenticateHeader);
-    if (!authCtx.scope) authCtx.scope = namespace;
+    // The scope advertised on the /v2/ ping is a placeholder (for example
+    // ghcr.io returns the literal "repository:user/image:pull"); the token has
+    // to be requested for the repository we actually want to access.
+    authCtx.scope = namespace;
     switch (authCtx.authType) {
       case "bearer":
         return await this.authenticateBearer(authCtx);
@@ -330,8 +341,10 @@ export class RegistryHTTPClient implements Registry {
   async authenticateBearer(ctx: AuthContext): Promise<HTTPContext> {
     const params = new URLSearchParams({
       service: ctx.service,
-      // explicitely include that we don't want an offline_token.
-      scope: `repository:${ctx.scope}:pull,push`,
+      // This client only ever pulls from the upstream registry (all pushes go
+      // to R2), and registries like ghcr.io deny tokens outright when push
+      // access is requested anonymously or with read-only credentials.
+      scope: `repository:${ctx.scope}:pull`,
       client_id: "r2registry",
       grant_type: this.configuration.username === undefined ? "none" : "password",
       password: this.configuration.username === undefined ? "" : this.password(),

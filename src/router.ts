@@ -18,6 +18,7 @@ import {
   registries,
 } from "./registry/registry";
 import { RegistryHTTPClient } from "./registry/http";
+import { purgeCachedManifests } from "./edge-cache";
 import { ociImageIndexContentType } from "./registry/r2";
 
 const maxReferrersListLimit = 1000;
@@ -101,6 +102,7 @@ v2Router.delete("/:name+/manifests/:reference", async (req, env: Env) => {
     limit: limitInt,
     cursor: last?.toString(),
   });
+  const deletedTags: string[] = [];
   for (const tag of tags.objects) {
     if (!tag.checksums.sha256) {
       continue;
@@ -108,10 +110,14 @@ v2Router.delete("/:name+/manifests/:reference", async (req, env: Env) => {
 
     if (hexToDigest(tag.checksums.sha256) === reference && tag.key !== `${name}/manifests/${reference}`) {
       await env.REGISTRY.delete(tag.key);
+      deletedTags.push(tag.key.split("/").pop()!);
     }
   }
 
   const url = new URL(req.url);
+  // The deleted tag aliases' cache entries must not outlive their R2 objects,
+  // even when the scan is truncated and we return early below
+  await purgeCachedManifests(env, url, name, deletedTags);
   if (tags.truncated) {
     url.searchParams.set("last", tags.truncated ? tags.cursor : "");
     return new Response(JSON.stringify(ManifestTagsListTooBigError), {
