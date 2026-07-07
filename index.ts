@@ -9,6 +9,7 @@ import { authenticationMethodFromEnv } from "./src/authentication-method";
 import { Registry } from "./src/registry/registry";
 import { R2Registry } from "./src/registry/r2";
 import { withEdgeCache } from "./src/edge-cache";
+import { adminPageResponse } from "./src/admin";
 
 // A full compatibility mode means that the r2 registry will try its best to
 // help the client on the layer push. See how we let the client push layers with chunked uploads for more information.
@@ -34,6 +35,14 @@ export interface Env {
 }
 
 const router = Router();
+
+/**
+ * Admin panel (browser UI). Runs behind the same auth as the rest of the
+ * registry: viewing needs a "pull" capability, and the delete/GC actions it
+ * issues are gated to "push" by the per-method capability checks.
+ */
+router.get("/admin", adminPageResponse);
+router.get("/admin/", adminPageResponse);
 
 /**
  * V2 Api
