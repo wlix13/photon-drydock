@@ -16,6 +16,11 @@
     // Production
     "production": {
       "r2_buckets": [{ "binding": "REGISTRY", "bucket_name": "${R2_BUCKET_NAME}" }],
+      // Workers Caching: set CACHE_ENABLED to activate.
+      // "cache": { "enabled": ${CACHE_ENABLED} },
+
+      // "placement": { "mode": "${PLACEMENT_MODE}" },
+
       "vars": {
         // Comma-separated list of base64-encoded JWT public keys. Tokens signed by any
         // of these keys are granted whatever capabilities the token claims.
@@ -24,7 +29,7 @@
         // "READONLY_JWT_REGISTRY_TOKENS_PUBLIC_KEY": "",
         // Edge caching of manifest and blob reads is on by default (requires custom domain above);
         // set to "off" to disable.
-        "EDGE_CACHE": "on",
+        "EDGE_CACHE": "${EDGE_CACHE:-on}",
       },
       // Secrets:
       // USERNAME/PASSWORD/READONLY_USERNAME/READONLY_PASSWORD if you want username/password based auth
