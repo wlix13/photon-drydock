@@ -1,6 +1,7 @@
 // Copy to wrangler.jsonc and fill in your values.
 // The real wrangler.jsonc is gitignored so account-specific values stay local.
 {
+  "$schema": "node_modules/wrangler/config-schema.json",
   "name": "photon-drydock",
 
   // Custom Cloudflare domain for worker (required for edge caching)
@@ -9,10 +10,9 @@
   // ],
 
   // set to false to disable the default Worker domain (applicable only if custom domain is used instead)
-  "workers_dev": true,
+  "workers_dev": ${WORKERS_DEV:-true},
   "main": "./index.ts",
-  "compatibility_date": "2024-09-09",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_date": "2026-11-14",
 
   "env": {
     // Production
