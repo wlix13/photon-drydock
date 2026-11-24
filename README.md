@@ -13,11 +13,9 @@ You have to install all the dependencies with [pnpm](https://pnpm.io/installatio
 pnpm install
 ```
 
-After installation, there are a few steps to actually deploy the registry into production:
+After installing dependencies, two ways exist to configure and deploy.
 
-1. Create your own wrangler config file based on the example files in this repo.
-
-Cloudflare recommends [`wrangler.jsonc`](https://developers.cloudflare.com/workers/wrangler/configuration/) for new projects, but `wrangler.toml` is also supported. Pick whichever you prefer:
+**Option A - copy, fill, deploy (no render step):**
 
 ```bash
 # JSONC (recommended)
@@ -27,26 +25,46 @@ $ cp wrangler.example.jsonc wrangler.jsonc
 $ cp wrangler.example.toml wrangler.toml
 ```
 
-1. In your config, replace `registry.example.com` in `routes` with your own (sub)domain. The domain's zone must be on your Cloudflare account; Cloudflare creates the DNS record for you on deploy. A custom domain is required for [edge caching](#edge-caching) — if you'd rather use the default `*.workers.dev` domain, remove the `routes` line and set `workers_dev` to `true` (the registry works, but nothing is cached).
+Edit config: replace `registry.example.com` in `routes` with your own (sub)domain.
+Domain zone must sit on your Cloudflare account.
+Cloudflare creates the DNS record on deploy.
+Custom domain is required for [edge caching](#edge-caching) - to use default `*.workers.dev` instead, remove `routes` and set `workers_dev` to `true` (registry works, nothing is cached).
 
-2. Create the R2 bucket (the config already references it by name):
+Create the R2 bucket (the config already references it by name):
 
 ```bash
-npx wrangler r2 bucket create r2-registry
+npx wrangler r2 bucket create photon-drydock
 ```
 
-1. Set the registry credentials:
+Set the registry credentials:
 
 ```bash
 npx wrangler secret put USERNAME --env production
 npx wrangler secret put PASSWORD --env production
 ```
 
-1. Deploy your image registry:
+Deploy your image registry:
 
 ```bash
 pnpm run deploy
 ```
+
+**Option B - render from env vars (CI-friendly):**
+
+```bash
+# Optional: JWT_REGISTRY_TOKENS_PUBLIC_KEY=your-base64-key (activates JWT auth)
+# Optional: CACHE_ENABLED=true PLACEMENT_MODE=smart EDGE_CACHE=on
+node scripts/render-wrangler.mjs --template wrangler.example.jsonc --out wrangler.jsonc
+# or for TOML
+node scripts/render-wrangler.mjs --template wrangler.example.toml --out wrangler.toml
+```
+
+Commented template lines activate when all their `${VAR}` placeholders resolve (from environment or `:-fallback`).
+Unresolved placeholders keep the line commented.
+
+Create the R2 bucket, set secrets, deploy as above.
+
+Production R2 bucket name is pinned in the template (`photon-drydock`); create it with `npx wrangler r2 bucket create photon-drydock`.
 
 Your registry is now live on your domain. It will refuse any requests until the credentials from step 4 are set.
 
@@ -81,8 +99,8 @@ sign to `pull`, regardless of the capabilities the token claims. Hand a read-onl
 party that should only ever pull, and it can never be used to push — even if the token requests it.
 `npx wrangler secret put READONLY_JWT_REGISTRY_TOKENS_PUBLIC_KEY --env production`
 
-**Combined with username/password:** JWT and username/password authentication can be enabled at the
-same time. When both are configured, a request is accepted if _either_ method verifies it — so, for example, humans can log in with a username/password while CI systems present signed tokens.
+**Combined with username/password:** JWT and username/password authentication can be enabled at the same time.
+When both are configured, a request is accepted if _either_ method verifies it — so, for example, humans can log in with a username/password while CI systems present signed tokens.
 
 #### Generating keys and tokens
 

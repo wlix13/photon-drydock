@@ -1,5 +1,7 @@
+// Copy to wrangler.jsonc and fill in your values.
+// The real wrangler.jsonc is gitignored so account-specific values stay local.
 {
-  "name": "r2-registry",
+  "name": "photon-drydock",
 
   // Custom Cloudflare domain for worker (required for edge caching)
   // "routes": [
@@ -15,16 +17,23 @@
   "env": {
     // Production
     "production": {
-      "r2_buckets": [{ "binding": "REGISTRY", "bucket_name": "" }],
+      "name": "photon-drydock",
+      "r2_buckets": [{ "binding": "REGISTRY", "bucket_name": "photon-drydock" }],
+      // Workers Caching: set CACHE_ENABLED to activate.
+      // "cache": { "enabled": ${CACHE_ENABLED} },
+
+      // "placement": { "mode": "${PLACEMENT_MODE}" },
       "vars": {
         // Comma-separated list of base64-encoded JWT public keys. Tokens signed by any
         // of these keys are granted whatever capabilities the token claims.
-        "JWT_REGISTRY_TOKENS_PUBLIC_KEY": "",
+        // JWT auth: set JWT_REGISTRY_TOKENS_PUBLIC_KEY (base64 public key) to activate.
+        // No auth var: use USERNAME/PASSWORD or READONLY_USERNAME/READONLY_PASSWORD as secrets.
+        // "JWT_REGISTRY_TOKENS_PUBLIC_KEY": "${JWT_REGISTRY_TOKENS_PUBLIC_KEY}",
         // Same format, but tokens signed by these keys are capped to pull (read-only).
         // "READONLY_JWT_REGISTRY_TOKENS_PUBLIC_KEY": "",
         // Edge caching of manifest and blob reads is on by default (requires custom domain above);
         // set to "off" to disable.
-        "EDGE_CACHE": "on",
+        "EDGE_CACHE": "${EDGE_CACHE:-on}",
       },
       // Secrets:
       // USERNAME/PASSWORD/READONLY_USERNAME/READONLY_PASSWORD if you want username/password based auth
